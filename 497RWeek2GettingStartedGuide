@@ -1,0 +1,246 @@
+using VortexLattice
+using Plots
+using LinearAlgebra
+
+#THIS SECTION DESCRIBES THE WING GEOMETRY
+#These are the coordinates for two separate locations that are joined by a straight line, combined into arrays
+xle = [0.0, 0.4] # leading edge x-position. 
+yle = [0.0, 7.5] # leading edge y-position
+zle = [0.0, 0.0] # leading edge z-position
+#The wing's leading edge goes from (0,0,0) to (0.4,7.5,0). It's important to note that this is only 
+#for a single wing, and the two data points for chord length (below) are for the root and the tip chord lengths, respectively.
+
+chord = [2.2, 1.8] # chord length
+theta = [2.0*pi/180, 2.0*pi/180] # twist (in radians), for the root and tip, respectively.
+phi = [0.0, 0.0] # section rotation about the x-axis. In other words, its the dihedral angle (in radians) 
+#(The measurement of how offset the wings are from the horizontal plane of the aircraft.)
+
+fc = fill((xc) -> 0, 2) # camberline function for each section (y/c = f(x/c))
+#This function describes the camberline of the airfoil sections along the span of the wing, creating the upper and 
+#lower edges of the airfoils. This function is set to zero (the first number), indicating that the wing has no camber 
+#and is a flat plate. The two indicates that there are two sections (root and tip) for which this function is defined
+#(if xle, yle, & zle had three points, you would increase this second digit to be three).
+
+ns = 12 # number of spanwise panels. Each panel is a trapezoidal shape bounded by the chords at the inner and outer
+#edges, as well as the leading and trailing edges of the wing. Each panel has a different shape.
+nc = 6  # number of chordwise panels. Similar to spanwise panels, but in the chordwise direction.
+spacing_s = Sine() # spanwise discretization scheme. This scheme uses a sine function to distribute the panels along 
+#the span of the wing, resulting in a higher concentration of panels near the wing root and tip, where aerodynamic 
+#effects are the greatest. In other words, the panels closest to the root and tips are narrower than those in between
+#them (in the spanwise direction).
+spacing_c = Uniform() # chordwise discretization scheme. Insted of concentrating the panels near the edges (See 
+#Sine function above), the panels are uniform throughout the wing (in the direction of the chord line).
+
+grid, ratio = wing_to_grid(xle, yle, zle, chord, theta, phi, ns, nc; 
+fc = fc, spacing_s=spacing_s, spacing_c=spacing_c, mirror=true)#This combines all the factors included in the ()
+#in order to create a meshed, 3-D shape of the wing. It stores this shape in the variable "grid", which is used later
+#in the code to perform aerodynamic analysis. The "ratio" variable is a vector storing chorwise panel stretching ratios
+#(the shape of the panels in the chordwise direction). This is used to compute the aerodynamic influence matrices
+#and the scale vortex strengths during the analysis. The mirror option is set to true, meaning that the wing is mirrored
+#across the aircraft's centerline to create a full wing (instead of just a half-wing).
+
+grids = [grid] #list of grids in the system (only one wing in this case). It simply stores the grid created above 
+#in a vector(useful for organizing and managing multiple grids in a more complex analysis involving several lifting 
+#surfaces)
+ratios = [ratio] #list of ratios in the system (only one wing in this case). It simply stores the grid created above 
+#in a vector(useful for organizing and managing multiple grids in a more complex analysis involving several lifting 
+#surfaces)
+system = System(grids; ratios) # Combines grids and ratios in a System object, which is a data structure used to store
+#and manage all the lifting surfaces in the analysis. This object is essential for performing aerodynamic calculations.
+
+Sref = 30.0 # reference area
+cref = 2.0  # reference chord
+bref = 15.0 # reference span
+rref = [0.50, 0.0, 0.0] # reference location for rotations/moments (typically the center of gravity)
+Vinf = 1.0 # reference velocity (magnitude)
+ref = Reference(Sref, cref, bref, rref, Vinf) #Creates a Reference object that stores the reference parameters used 
+#in the aerodynamic analysis.
+
+alpha = 1.0*pi/180 # angle of attack
+beta = 0.0 # sideslip angle. The angle between the aircraft’s forward‑pointing axis and the actual direction the air 
+#is coming from. When you set beta = 0.0, you are telling the solver the aircraft has no sideways motion relative to 
+#the airflow.
+Omega = [0.0, 0.0, 0.0] # rotational velocity around the reference location (rref). This vector represents the angular 
+#velocity of the aircraft in three-dimensional space, with components along the x, y, and z axes. Setting it to 
+#[0.0, 0.0, 0.0] indicates that the aircraft is not rotating.
+fs = Freestream(Vinf, alpha, beta, Omega) #Combines the freestream parameters into a Freestream object, which is used
+#to define the incoming airflow conditions for the aerodynamic analysis.
+
+symmetric = false #When set to false, the solver considers both sides of the aircraft separately, allowing for asymmetric
+#flow conditions and forces. This is important for accurately capturing the aerodynamic behavior of the aircraft,
+#especially during maneuvers (anytime theres a rolling and yawing moment) or in the presence of crosswinds. When set
+#to false, the solver does not assume symmetry about the aircraft's centerline and cancel out forces and moments.
+
+steady_analysis!(system, ref, fs; symmetric)
+#This function performs a steady-state aerodynamic analysis on the lifting surfaces defined in the "system" object,
+#using the reference parameters in the "ref" object and the freestream conditions in the "fs" object (Simply put, 
+#it takes all the information found above, and performed an aerodynamic analysis). The analysis assumes that the flow
+#conditions are constant over time (steady) and that the aircraft is not symmetric about its centerline (symmetric=false).
+#The results of the analysis, including aerodynamic forces and moments, are stored within the "system" object for further 
+#evaluation
+CF, CM = body_forces(system; frame=Wind()) #This creates the force and moment vectors in the wind frame of reference.
+#Of the force vector, the x-component is the drag force, the y-component is the side force, and the z-component is 
+#the lift force. Of the moment vector, the x-component is the rolling moment, the y-component is the pitching moment,
+#and the z-component is the yawing moment.
+
+# extract aerodynamic forces from the vectors created above.
+CD, CY, CL = CF
+Cl, Cm, Cn = CM
+
+CDiff = far_field_drag(system)#Computes the drag contribution from the far-field induced drag, which is the drag caused by the
+#vortices shed into the wake behind the lifting surfaces. This function calculates the far-field drag based on the vortex strengths
+#and wake geometry determined during the steady-state analysis. The result is stored in the variable "CDiff".
+#Simply put --> It calculated the coefficient of induced drag.
+
+# calculate lifting line coefficients
+cf, cm = lifting_line_coefficients(system; frame=Body()) #cf is the calculated section force coefficients along the 
+#span, and cm is the calculated section moment coefficients along the span. They are distributions and not total forces.
+#frame=body means that its using the reference frame of the aircraft body (as opposed to wind frame used earlier).
+
+dCFb, dCMb = body_derivatives(system)#This function computes the body-axis aerodynamic derivatives for the lifting 
+#surfaces defined in the "system" object. These derivatives quantify how the aerodynamic forces and moments change 
+#in response to small perturbations in the aircraft's motion, such as changes in velocity or angular rates. The 
+#results are stored in the variables "dCFb" and "dCMb", which contain the derivatives of the force and moment 
+#coefficients, respectively.
+#SIMPLIFIED--> It calculated how the forces and moments change as the aircraft moves in different ways.
+
+# traditional names for each body derivative. The following is simply separating the results found above into 
+#more manageable variables.
+CXu, CYu, CZu = dCFb.u
+CXv, CYv, CZv = dCFb.v
+CXw, CYw, CZw = dCFb.w
+CXp, CYp, CZp = dCFb.p
+CXq, CYq, CZq = dCFb.q
+CXr, CYr, CZr = dCFb.r
+Clu, Cmu, Cnu = dCMb.u
+Clv, Cmv, Cnv = dCMb.v
+Clw, Cmw, Cnw = dCMb.w
+Clp, Cmp, Cnp = dCMb.p
+Clq, Cmq, Cnq = dCMb.q
+Clr, Cmr, Cnr = dCMb.r
+
+dCFs, dCMs = stability_derivatives(system) #This is doing the same thing as the body derivatives function above, but 
+#instead using the stability axes. The stability axes are a coordinate system aligned with the aircraft's
+#longitudinal and lateral directions, which are more relevant for stability and control analysis. (This axis changes
+#with the angle of attack and sideslip angle of the aircraft, making it more suitable for evaluating stability as it 
+#aligns more naturally with lift and drag forces.)
+
+# traditional names for each stability derivative. The following is simply separating the results found above into 
+#more manageable variables.
+CDa, CYa, CLa = dCFs.alpha
+Cla, Cma, Cna = dCMs.alpha
+CDb, CYb, CLb = dCFs.beta
+Clb, Cmb, Cnb = dCMs.beta
+CDp, CYp, CLp = dCFs.p
+Clp, Cmp, Cnp = dCMs.p
+CDq, CYq, CLq = dCFs.q
+Clq, Cmq, Cnq = dCMs.q
+CDr, CYr, CLr = dCFs.r
+Clr, Cmr, Cnr = dCMs.r
+
+write_vtk("simplewing", system) #This simply exports the results and the resulting 3-D model into a VTK file that you
+#can open with visualization software like ParaView or VisIt. This allows you to visually inspect the geometry,
+#paneling, and the aerodynamic results on the lifting surfaces.
+
+
+
+
+##Lift vs Angle of Attack Curve
+
+# lift = []
+# angle = []
+#     global alpha = 1.0*pi/180 # angle of attack
+# for i in 1:500
+#     fs = Freestream(Vinf, alpha, beta, Omega)
+#     steady_analysis!(system, ref, fs; symmetric)
+#     CF, CM = body_forces(system; frame=Wind())
+#     push!(lift, CF[3])
+#     push!(angle, alpha * (180/pi))
+#     global alpha += 0.2*pi/180
+# end
+# using Plots
+# plot(angle, lift, xlabel="Angle of Attack (degrees)", ylabel="Lift",
+#     title="Lift Curve", legend=false)
+
+    
+
+
+# ###Induced drag vs Angle of Attack Curve
+# induced_drag = []
+# angle2 = []
+#     global alpha = 1.0*pi/180 # angle of attack
+# for i in 1:500
+#     fs = Freestream(Vinf, alpha, beta, Omega)
+#     steady_analysis!(system, ref, fs; symmetric)
+#     CDiff = far_field_drag(system)
+#     push!(induced_drag, CDiff)
+#     push!(angle2, alpha * (180/pi))
+#     global alpha += 0.2*pi/180
+# end
+# plot(angle2, induced_drag, xlabel="Angle of Attack (degrees)", ylabel="Induced Drag Coefficient",
+#     title="Induced Drag Curve", legend=false)
+
+
+
+
+# ##Moment vs Angle of Attack Curve
+# momentroll = []
+# momentpitch = []
+# momentyaw = []
+# moment = []
+# angle3 = []
+#     global alpha = 1.0*pi/180 # angle of attack
+# for i in 1:1000
+#     fs = Freestream(Vinf, alpha, beta, Omega)
+#     steady_analysis!(system, ref, fs; symmetric)
+#     CF, CM = body_forces(system; frame=Wind())
+#     push!(momentroll, CM[1])
+#     push!(momentpitch, CM[2])
+#     push!(momentyaw, CM[3])
+#     push!(moment, norm(CM))
+#     push!(angle3, alpha * (180/pi))
+#     global alpha += 0.1*pi/180
+# end
+# plot(angle3, momentpitch, xlabel="Angle of Attack (degrees)",
+#     title="Moment Curves", legend=false, label="Pitching Moment", color=:blue)
+# plot!(angle3, momentroll, legend=true, color=:brown, label="Rolling Moment")
+# plot!(angle3, momentyaw, legend=true, color=:green, label="Yawing Moment")
+# plot!(angle3, moment, legend=true, color=:purple, label="Total Moment")
+
+
+
+
+# ###Lift vs Drag Curve
+# lift2 = []
+# drag2 = []
+# for i in 1:250
+#     global alpha = i * (0.2 * pi/180) # angle of attack
+#     fs = Freestream(Vinf, alpha, beta, Omega)
+#     steady_analysis!(system, ref, fs; symmetric)
+#     CF, CM = body_forces(system; frame=Wind())
+#     CDiff = far_field_drag(system)
+#     push!(lift2, CF[3])
+#     push!(drag2, CF[1])
+# end
+# plot(drag2, lift2, xlabel="Drag", ylabel="Lift",
+#     title="Lift vs Drag Curve", legend=false)
+
+
+##Lift/Drag vs Angle of Attack Curve
+
+lift = []
+angle5 = []
+drag3 = []
+    global alpha = 1.0*pi/180 # angle of attack
+for i in 1:500
+    fs = Freestream(Vinf, alpha, beta, Omega)
+    steady_analysis!(system, ref, fs; symmetric)
+    CF, CM = body_forces(system; frame=Wind())
+    push!(lift, CF[3])
+    push!(angle5, alpha * (180/pi))
+    push!(drag3, CF[1])
+    global alpha += 0.2*pi/180
+end
+plot(angle, lift, xlabel="Angle of Attack (degrees)", ylabel="Lift",
+    title="Lift & Drag Curves", legend=true, label="Lift")
+plot!(angle5, drag3, color=:red, label="Drag")
